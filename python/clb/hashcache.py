@@ -36,6 +36,14 @@
 #
 # If environment variable DEBUG is set to anything, the program
 # displays debug information to stderr as it runs.
+#
+# The cache is represented in memory as a Python 'dict', and on disk
+# as JSON. The cache consists of two top level objects: 'metadata'
+# and 'index'. The 'metadata' object contains information about the
+# cache, such as the hash algorithm, and the way relative pathnames
+# are indexed. The 'index' object contains the list of cached path
+# names, each path name the key to its last known file length, file
+# update timestamp, and hash.
 # --------------------------------------------------------------------
 
 import sys
@@ -69,9 +77,7 @@ class HashCache:
     # --------------------------------------------------------------------
 
     def __init__(self):
-        self.cache_filepath = DEFAULT_CACHE_FILEPATH
-        self.cache = {}
-        debug(f"__init__(): cache_filepath={self.cache_filepath}")
+        self.__init__(DEFAULT_CACHE_FILEPATH)
 
     # --------------------------------------------------------------------
     # Instantiates an instance using the given cache filename.
@@ -79,16 +85,31 @@ class HashCache:
 
     def __init__(self, cache_filepath):
         self.cache_filepath = cache_filepath
-        self.cache = {}
+        self.clear()
         debug(f"__init__(): cache_filepath={self.cache_filepath}")
 
     # --------------------------------------------------------------------
-    # Returns a deep copy of the cache.
+    # Wipes the in-memory cache.
     # --------------------------------------------------------------------
 
-    def get_cache(self):
-        debug(f"get_cache()")
-        return self.cache.deepcopy()
+    def clear(self):
+        self.cache = {
+            "metadata": {
+                "hashAlgorithm": "md5",
+                "absolutePaths": False
+            },
+            "index": {}
+        }
+        self.index = self.cache["index"]
+        debug(f"clear()")
+
+    # --------------------------------------------------------------------
+    # Returns a deep copy of the cache index.
+    # --------------------------------------------------------------------
+
+    def get_index(self):
+        debug(f"get_index()")
+        return self.index.deepcopy()
 
     # --------------------------------------------------------------------
     # Returns the cache file pathname.
@@ -109,32 +130,35 @@ class HashCache:
         self.cache_filepath = filepath
 
     # --------------------------------------------------------------------
-    # Loads the cache from the file as named by get_cache_filepath().
+    # Clears the in-memory cache, then loads the cache from the file as
+    # named by get_cache_filepath().
     # --------------------------------------------------------------------
 
     def load_cache(self):
         debug(f"load_cache(): cache_filepath={self.cache_filepath}")
+        self.clear()
         try:
             with open(self.cache_filepath, 'r') as f:
                 self.cache = json.load(f)
+                self.index = self.cache["index"]
         except Exception as e:
             debug(f"load_cache(): exception e={e}")
-            self.cache = {}
         finally:
-            debug(f"load_cache(): len(cache)={len(self.cache)}")
+            debug(f"load_cache(): len(index)={len(self.index)}")
 
     # --------------------------------------------------------------------
     # Saves the cache to the file as named by get_cache_filepath().
     # --------------------------------------------------------------------
 
     def save_cache(self):
+        debug(f"save_cache(): cache_filepath={self.cache_filepath}")
         try:
             with open(self.cache_filepath, 'w') as f:
                 json.dump(self.cache, f)
         except Exception as e:
             debug(f"save_cache(): exception e={e}")
         finally:
-            debug(f"save_cache(): len(cache)={len(self.cache)}")
+            debug(f"save_cache(): len(index)={len(self.index)}")
 
     # --------------------------------------------------------------------
     # Returns the timestamp, length, and MD5 hash of the contents of the
@@ -152,18 +176,18 @@ class HashCache:
             debug(f"get_full_spec(): MISS: filepath={filepath} spec={spec}")
             if spec != None:
                 debug(f"get_full_spec(): MISS: NEW")
-                self.cache[filepath] = spec
+                self.index[filepath] = spec
         else:
             simple = self.get_simple_spec_fs(filepath)
             debug(f"get_full_spec(): HIT: filepath={filepath}")
             if simple == None:
                 debug(f"get_full_spec(): HIT: DELETED")
                 spec = None
-                self.cache.pop(filepath, None)
+                self.index.pop(filepath, None)
             elif spec["ts"] != simple["ts"] or spec["len"] != simple["len"]:
                 debug(f"get_full_spec(): HIT: STALE")
                 spec = self.get_full_spec_fs(filepath)
-                self.cache[filepath] = spec
+                self.index[filepath] = spec
             else:
                 debug("HIT: MATCH")
         return spec
@@ -175,7 +199,7 @@ class HashCache:
 
     def get_full_spec_cache(self,filepath):
         try:
-            return self.cache[filepath]
+            return self.index[filepath]
         except Exception as e:
             return None
 
