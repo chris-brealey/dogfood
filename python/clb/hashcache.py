@@ -54,6 +54,8 @@ import argparse
 
 DEBUG = os.environ.get('DEBUG')
 DEFAULT_CACHE_FILEPATH = "/tmp/hashcache.json"
+DEFAULT_HASH_ALGORITHM = "md5"
+DEFAULT_ABSOLUTE_PATHS = False
 
 # --------------------------------------------------------------------
 # Displays a debug message to stderr, if the DEBUG environment
@@ -68,40 +70,48 @@ def debug(msg):
 # Each object of this class represents an instance of a cache backed
 # by a specific cache filename. Do not instantiate multiple instances
 # backed by the same cache file. The results are likely undesirable.
+# When instantiating a HashCache, you can override the default cache
+# file pathname, the hash algorithm, and relative pathname handling.
+# The cache file pathname can be changed using set_cache_filepath().
+# The other properties can be altered when clearing the cache, and
+# are updated when loading a cache. In other words, cache metadata
+# cannot be altered once data is loaded into the cache index.
 # --------------------------------------------------------------------
 
 class HashCache:
 
     # --------------------------------------------------------------------
-    # Instantiates an instance using the default cache filename.
+    # Instantiates an instance of the cache. Although the method captures
+    # the cache filename, the file system is not accessed at this time.
+    # Only the load_cache() and save_cache() methods do that.
     # --------------------------------------------------------------------
 
-    def __init__(self):
-        self.__init__(DEFAULT_CACHE_FILEPATH)
-
-    # --------------------------------------------------------------------
-    # Instantiates an instance using the given cache filename.
-    # --------------------------------------------------------------------
-
-    def __init__(self, cache_filepath):
+    def __init__(self, cache_filepath=DEFAULT_CACHE_FILEPATH, hash_algorithm=DEFAULT_HASH_ALGORITHM, absolute_paths=DEFAULT_ABSOLUTE_PATHS):
         self.cache_filepath = cache_filepath
-        self.clear()
-        debug(f"__init__(): cache_filepath={self.cache_filepath}")
+        self.clear(hash_algorithm, absolute_paths)
+        debug(f"__init__(): cache_filepath={self.cache_filepath} hash_algorithm={self.hash_algorithm} absolute_paths={self.absolute_paths}")
 
     # --------------------------------------------------------------------
-    # Wipes the in-memory cache.
+    # Clears, or effectively initializes, the in-memory cache. The core
+    # of the cache is "index", a dict of file metadata keyed by pathname.
+    # Additional in memory variables "hashAlgorithm" and "absolutePaths"
+    # duplicate information in the index metadata, but are defined so
+    # that get_full_spec_fs() isn't spending time dereferencing the
+    # "metadata" dict and its children.
     # --------------------------------------------------------------------
 
-    def clear(self):
+    def clear(self, hash_algorithm=DEFAULT_HASH_ALGORITHM, absolute_paths=DEFAULT_ABSOLUTE_PATHS):
+        self.hash_algorithm = hash_algorithm
+        self.absolute_paths = absolute_paths
         self.cache = {
             "metadata": {
-                "hashAlgorithm": "md5",
-                "absolutePaths": False
+                "hashAlgorithm": self.hash_algorithm,
+                "absolutePaths": self.absolute_paths
             },
             "index": {}
         }
         self.index = self.cache["index"]
-        debug(f"clear()")
+        debug(f"clear(): cache_filepath={self.cache_filepath} hash_algorithm={self.hash_algorithm} absolute_paths={self.absolute_paths} cache={self.cache}")
 
     # --------------------------------------------------------------------
     # Returns a deep copy of the cache index.
@@ -130,35 +140,51 @@ class HashCache:
         self.cache_filepath = filepath
 
     # --------------------------------------------------------------------
-    # Clears the in-memory cache, then loads the cache from the file as
+    # Returns the hash algorithm.
+    # --------------------------------------------------------------------
+
+    def get_hash_algorithm(self):
+        debug(f"get_hash_algorithm(): hash_algorithm={self.hash_algorithm}")
+        return self.hash_algorithm
+
+    # --------------------------------------------------------------------
+    # Returns the absolute path setting.
+    # --------------------------------------------------------------------
+
+    def get_absolute_paths(self):
+        debug(f"get_absolute_paths(): absolute_paths={self.absolute_paths}")
+        return self.absolute_paths
+
+    # --------------------------------------------------------------------
+    # Clears the in-memory index, then loads the cache from the file as
     # named by get_cache_filepath().
     # --------------------------------------------------------------------
 
     def load_cache(self):
-        debug(f"load_cache(): cache_filepath={self.cache_filepath}")
-        self.clear()
+        self.cache["index"] = {}
+        self.index = self.cache["index"]
         try:
             with open(self.cache_filepath, 'r') as f:
                 self.cache = json.load(f)
                 self.index = self.cache["index"]
+                self.hash_algorithm = self.cache["metadata"]["hashAlgorithm"]
+                self.absolute_paths = self.cache["metadata"]["absolutePaths"]
         except Exception as e:
             debug(f"load_cache(): exception e={e}")
         finally:
-            debug(f"load_cache(): len(index)={len(self.index)}")
+            debug(f"load_cache(): cache_filepath={self.cache_filepath} len(index)={len(self.index)} cache_filepath={self.cache_filepath} hash_algorithm={self.hash_algorithm} absolute_paths={self.absolute_paths}")
 
     # --------------------------------------------------------------------
     # Saves the cache to the file as named by get_cache_filepath().
     # --------------------------------------------------------------------
 
     def save_cache(self):
-        debug(f"save_cache(): cache_filepath={self.cache_filepath}")
+        debug(f"save_cache(): cache_filepath={self.cache_filepath} len(index)={len(self.index)} cache_filepath={self.cache_filepath} hash_algorithm={self.hash_algorithm} absolute_paths={self.absolute_paths}")
         try:
             with open(self.cache_filepath, 'w') as f:
                 json.dump(self.cache, f)
         except Exception as e:
             debug(f"save_cache(): exception e={e}")
-        finally:
-            debug(f"save_cache(): len(index)={len(self.index)}")
 
     # --------------------------------------------------------------------
     # Returns the timestamp, length, and MD5 hash of the contents of the
@@ -211,15 +237,14 @@ class HashCache:
 
     def get_full_spec_fs(self,filepath):
         try:
-            md5_hash = hashlib.md5()
+            algorithm = hashlib.new(self.hash_algorithm)
             with open(filepath, "rb") as f:
-                # Read and update hash in 4KB chunks
                 for chunk in iter(lambda: f.read(4096), b""):
-                    md5_hash.update(chunk)
+                    algorithm.update(chunk)
             spec = {
                 "ts": os.path.getmtime(filepath),
                 "len": os.path.getsize(filepath),
-                "hash": md5_hash.hexdigest()
+                "hash": algorithm.hexdigest()
             }
             return spec
         except Exception as e:
@@ -250,11 +275,12 @@ def main():
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('-c', '--cache', default=DEFAULT_CACHE_FILEPATH)
+    parser.add_argument('-a', '--algorithm', default=DEFAULT_HASH_ALGORITHM)
     parser.add_argument('pathnames', nargs='*')
     args = parser.parse_args()
     debug(f"main(): args.cache={args.cache}")
     debug(f"main(): args.pathnames={args.pathnames}")
-    hashcache = HashCache(args.cache)
+    hashcache = HashCache(args.cache,hash_algorithm=args.algorithm)
     hashcache.load_cache()
     for f in args.pathnames:
         spec = hashcache.get_full_spec(f)
